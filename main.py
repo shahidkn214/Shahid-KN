@@ -583,6 +583,51 @@ def find_ffmpeg_binary() -> Optional[str]:
             return loc
     return None
 
+async def run_ytdlp_process(cmd: list, job: dict, progress_re: re.Pattern) -> tuple[int, list[str]]:
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+
+    stderr_output = []
+
+    async def capture_stderr():
+        try:
+            while True:
+                err_line = await proc.stderr.readline()
+                if not err_line:
+                    break
+                decoded = err_line.decode("utf-8", errors="ignore").strip()
+                if decoded:
+                    stderr_output.append(decoded)
+        except Exception:
+            pass
+
+    asyncio.create_task(capture_stderr())
+
+    while True:
+        line_bytes = await proc.stdout.readline()
+        if not line_bytes:
+            break
+        line = line_bytes.decode("utf-8", errors="ignore").strip()
+
+        match = progress_re.search(line)
+        if match:
+            pct = float(match.group(1))
+            job["progress"] = min(95, max(10, int(pct)))
+            job["total_size"] = match.group(2)
+            job["speed"] = match.group(3)
+            job["eta"] = match.group(4)
+            job["status"] = "downloading"
+        elif "[ExtractAudio]" in line or "[ffmpeg]" in line or "Post-process" in line or "[Merger]" in line:
+            job["status"] = "converting"
+            job["progress"] = 94
+            job["speed"] = "Encoding & FFmpeg processing..."
+
+    await proc.wait()
+    return proc.returncode, stderr_output
+
 async def execute_download_job(job_id: str, url: str, fmt: str, quality: str):
     job = active_jobs.get(job_id)
     if not job:
@@ -595,138 +640,135 @@ async def execute_download_job(job_id: str, url: str, fmt: str, quality: str):
 
     ffmpeg_bin = find_ffmpeg_binary()
 
-    cmd = [
+    base_args = [
         "yt-dlp",
         "--no-warnings",
         "--no-playlist",
-        "--socket-timeout", "15",
+        "--socket-timeout", "20",
         "--max-filesize", "500M",
-        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "--geo-bypass",
+        "--no-check-certificates",
+        "--extractor-retries", "5",
+        "--fragment-retries", "10",
+        "--retry-sleep", "1",
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
         "--referer", "https://www.google.com/",
+        "--add-header", "Accept-Language:en-US,en;q=0.9",
+        "--add-header", "Sec-Fetch-Mode:navigate",
         "-o", output_template,
         "--newline"
     ]
 
     if ffmpeg_bin:
-        cmd.extend(["--ffmpeg-location", ffmpeg_bin])
+        base_args.extend(["--ffmpeg-location", ffmpeg_bin])
 
-    if fmt == "mp3":
-        audio_bitrate = str(quality).lower().replace("k", "")
-        if audio_bitrate not in ["320", "192", "128", "64"]:
-            audio_bitrate = "192"
+    # Player client strategies to bypass 403 Forbidden
+    client_strategies = [
+        "youtube:player_client=android,ios,web;player_skip=configs;generic:impersonate=chrome",
+        "youtube:player_client=ios,web;player_skip=configs",
+        "youtube:player_client=android,web;player_skip=configs",
+        "youtube:player_client=web;player_skip=configs"
+    ]
 
-        cmd.extend([
-            "-f", "bestaudio/best",
-            "-x",
-            "--audio-format", "mp3",
-            "--audio-quality", audio_bitrate,
-            "--embed-thumbnail",
-            "--add-metadata"
-        ])
-    else:
-        target_height = 720
-        match = re.search(r"(\d{3,4})", str(quality))
-        if match:
-            target_height = int(match.group(1))
+    progress_re = re.compile(r"\[download\]\s+([0-9\.]+)%\s+of\s+~?([^\s]+)\s+at\s+([^\s]+)\s+ETA\s+([^\s]+)")
 
-        format_ladder = (
-            f"bestvideo[height<={target_height}][ext=mp4]+bestaudio[ext=m4a]/"
-            f"bestvideo[height<={target_height}]+bestaudio/"
-            f"best[height<={target_height}]/"
-            f"bestvideo+bestaudio/"
-            f"best"
-        )
+    for attempt, extractor_arg in enumerate(client_strategies):
+        cmd = list(base_args)
+        cmd.extend(["--extractor-args", extractor_arg])
 
-        cmd.extend([
-            "-f", format_ladder,
-            "--merge-output-format", "mp4",
-        ])
+        if fmt == "mp3":
+            audio_bitrate = str(quality).lower().replace("k", "")
+            if audio_bitrate not in ["320", "192", "128", "64"]:
+                audio_bitrate = "192"
 
-    cmd.append(url)
-    logger.info(f"Executing secure job {job_id} on {url}")
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-
-        progress_re = re.compile(r"\[download\]\s+([0-9\.]+)%\s+of\s+~?([^\s]+)\s+at\s+([^\s]+)\s+ETA\s+([^\s]+)")
-        stderr_output = []
-
-        async def capture_stderr():
-            try:
-                while True:
-                    err_line = await proc.stderr.readline()
-                    if not err_line:
-                        break
-                    decoded = err_line.decode("utf-8", errors="ignore").strip()
-                    if decoded:
-                        stderr_output.append(decoded)
-            except Exception:
-                pass
-
-        asyncio.create_task(capture_stderr())
-
-        while True:
-            line_bytes = await proc.stdout.readline()
-            if not line_bytes:
-                break
-            line = line_bytes.decode("utf-8", errors="ignore").strip()
-
-            match = progress_re.search(line)
-            if match:
-                pct = float(match.group(1))
-                job["progress"] = min(95, max(10, int(pct)))
-                job["total_size"] = match.group(2)
-                job["speed"] = match.group(3)
-                job["eta"] = match.group(4)
-                job["status"] = "downloading"
-            elif "[ExtractAudio]" in line or "[ffmpeg]" in line or "Post-process" in line or "[Merger]" in line:
-                job["status"] = "converting"
-                job["progress"] = 94
-                job["speed"] = "Encoding & FFmpeg processing..."
-
-        await proc.wait()
-
-        if proc.returncode != 0:
-            full_err = "\n".join(stderr_output)
-            logger.error(f"Job {job_id} failed with code {proc.returncode}: {full_err}")
-            job["status"] = "failed"
-            meaningful_err = "Media extraction/conversion encountered an error."
-            for l in reversed(stderr_output):
-                if "ERROR:" in l or "error" in l.lower():
-                    meaningful_err = l.replace("ERROR:", "").strip()
-                    break
-            job["error"] = meaningful_err
-            return
-
-        ext = "mp3" if fmt == "mp3" else "mp4"
-        final_file = TEMP_DIR / f"{job_id}.{ext}"
-
-        if not final_file.exists():
-            matched = list(TEMP_DIR.glob(f"{job_id}.*"))
-            if matched:
-                final_file = matched[0]
-                ext = final_file.suffix.lstrip(".")
-
-        if final_file.exists() and is_safe_path(final_file):
-            job["status"] = "completed"
-            job["progress"] = 100
-            job["speed"] = "Done"
-            job["file_path"] = str(final_file)
-            job["file_size"] = final_file.stat().st_size
-            job["download_url"] = f"/api/file/{job_id}"
-            logger.info(f"Job {job_id} completed successfully: {final_file}")
+            cmd.extend([
+                "-f", "bestaudio/best",
+                "-x",
+                "--audio-format", "mp3",
+                "--audio-quality", audio_bitrate,
+                "--embed-thumbnail",
+                "--add-metadata"
+            ])
         else:
-            job["status"] = "failed"
-            job["error"] = "Output file was not generated or path violation."
+            target_height = 720
+            match = re.search(r"(\d{3,4})", str(quality))
+            if match:
+                target_height = int(match.group(1))
 
-    except Exception as e:
-        logger.exception(f"Unexpected error in job {job_id}: {e}")
-        job["status"] = "failed"
-        job["error"] = "Media processing encountered an unexpected issue."
+            if attempt > 0:
+                format_ladder = (
+                    f"bestvideo[height<={target_height}]+bestaudio/"
+                    f"best[height<={target_height}]/"
+                    f"best"
+                )
+            else:
+                format_ladder = (
+                    f"bestvideo[height<={target_height}][ext=mp4]+bestaudio[ext=m4a]/"
+                    f"bestvideo[height<={target_height}]+bestaudio/"
+                    f"best[height<={target_height}]/"
+                    f"bestvideo+bestaudio/"
+                    f"best"
+                )
+
+            cmd.extend([
+                "-f", format_ladder,
+                "--merge-output-format", "mp4",
+            ])
+
+        cmd.append(url)
+        logger.info(f"Executing secure job {job_id} (attempt {attempt+1}) on {url}")
+
+        try:
+            returncode, stderr_output = await run_ytdlp_process(cmd, job, progress_re)
+
+            if returncode == 0:
+                ext = "mp3" if fmt == "mp3" else "mp4"
+                final_file = TEMP_DIR / f"{job_id}.{ext}"
+
+                if not final_file.exists():
+                    matched = list(TEMP_DIR.glob(f"{job_id}.*"))
+                    if matched:
+                        final_file = matched[0]
+                        ext = final_file.suffix.lstrip(".")
+
+                if final_file.exists() and is_safe_path(final_file):
+                    job["status"] = "completed"
+                    job["progress"] = 100
+                    job["speed"] = "Done"
+                    job["file_path"] = str(final_file)
+                    job["file_size"] = final_file.stat().st_size
+                    job["download_url"] = f"/api/file/{job_id}"
+                    logger.info(f"Job {job_id} completed successfully on attempt {attempt+1}: {final_file}")
+                    return
+
+            # Check if 403 or client error occurred, retry with next client
+            full_err = "\n".join(stderr_output)
+            logger.warning(f"Job {job_id} attempt {attempt+1} failed ({returncode}): {full_err}")
+
+            if "403" in full_err or "Forbidden" in full_err or "bot" in full_err.lower():
+                job["speed"] = f"Switching client strategy ({attempt+2}/{len(client_strategies)})..."
+                await asyncio.sleep(1)
+                continue
+            else:
+                # If not a client/403 issue and last attempt, break
+                if attempt == len(client_strategies) - 1:
+                    break
+
+        except Exception as e:
+            logger.exception(f"Unexpected error in job {job_id} attempt {attempt+1}: {e}")
+            if attempt == len(client_strategies) - 1:
+                break
+
+    # If all attempts failed
+    meaningful_err = "Media stream returned 403 Forbidden or is restricted by the platform. Please try another video or copy the full direct URL."
+    if 'stderr_output' in locals():
+        for l in reversed(stderr_output):
+            if "ERROR:" in l or "error" in l.lower():
+                meaningful_err = l.replace("ERROR:", "").strip()
+                break
+
+    job["status"] = "failed"
+    job["error"] = meaningful_err
 
 # ---------------------------------------------------------------------------
 # 8. Complete API Routes & Aliases

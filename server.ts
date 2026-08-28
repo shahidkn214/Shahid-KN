@@ -1408,20 +1408,30 @@ const handleDownloadRequest = async (req: express.Request, res: express.Response
 
     activeJobs.set(jobId, job);
 
-    // Build download arguments with platform extractors (including Twitter/X syndication)
+    // Build download arguments with platform extractors (including Twitter/X syndication and YouTube anti-403)
     const args = [
       '--newline',
       '--no-playlist',
       '--socket-timeout',
-      '15',
+      '20',
       '--max-filesize',
       '500M',
+      '--geo-bypass',
+      '--no-check-certificates',
+      '--extractor-retries',
+      '5',
+      '--fragment-retries',
+      '10',
+      '--retry-sleep',
+      '1',
       '--user-agent',
-      USER_AGENT,
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
       '--referer',
       'https://www.google.com/',
+      '--add-header',
+      'Accept-Language:en-US,en;q=0.9',
       '--extractor-args',
-      'twitter:api=syndication;youtube:player_client=android,web;tiktok:api_hostname=api16-normal-c-useast1a.tiktokv.com;generic:impersonate=chrome',
+      'twitter:api=syndication;youtube:player_client=android,ios,web;player_skip=configs;tiktok:api_hostname=api16-normal-c-useast1a.tiktokv.com;generic:impersonate=chrome',
     ];
 
     // Detect ffmpeg binary
