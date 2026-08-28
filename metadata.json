@@ -1,0 +1,6 @@
+{
+  "name": "StreamDrop",
+  "description": "Universal Media Downloader & Converter supporting YouTube, Facebook, TikTok, Instagram, Twitter/X, and SoundCloud with MP4/MP3 conversion.",
+  "requestFramePermissions": ["clipboard-read", "clipboard-write"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: nexversal-downloader
+    env: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: TEMP_DIR
+        value: /tmp/nexversal_downloads
+      - key: JWT_SECRET
+        generateValue: true
