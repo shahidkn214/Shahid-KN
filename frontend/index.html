@@ -877,47 +877,73 @@
     async function triggerBlobDownload(downloadUrl, fallbackFilename, onStatusUpdate) {
       if (onStatusUpdate) onStatusUpdate('Fetching file stream from server...');
       
-      const response = await fetch(downloadUrl);
-      if (!response.ok) {
-        throw new Error(`Server returned HTTP ${response.status}: ${response.statusText || 'Download failed'}`);
-      }
-
-      if (onStatusUpdate) onStatusUpdate('Saving to device storage...');
-      const blob = await response.blob();
-      
-      if (!blob || blob.size === 0) {
-        throw new Error('Received an empty file stream from the server.');
-      }
-
-      const blobUrl = window.URL.createObjectURL(blob);
-      
-      // Determine safe filename from headers or fallback
-      let finalFilename = fallbackFilename || 'streamdrop_media.mp4';
-      const disposition = response.headers.get('Content-Disposition');
-      if (disposition && disposition.includes('filename=')) {
-        const matches = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
-        if (matches && matches[1]) {
-          finalFilename = decodeURIComponent(matches[1].replace(/['"]/g, '').trim());
+      try {
+        const response = await fetch(downloadUrl);
+        if (!response.ok) {
+          console.warn(`Blob fetch returned HTTP ${response.status}, triggering direct link fallback.`);
+          const directLink = document.createElement('a');
+          directLink.href = downloadUrl;
+          directLink.download = fallbackFilename || 'media.mp4';
+          document.body.appendChild(directLink);
+          directLink.click();
+          setTimeout(() => {
+            if (document.body.contains(directLink)) document.body.removeChild(directLink);
+          }, 1500);
+          return fallbackFilename;
         }
-      }
 
-      // Dynamically create a hidden link, click, and revoke URL
-      const link = document.createElement('a');
-      link.style.display = 'none';
-      link.href = blobUrl;
-      link.download = finalFilename;
-      document.body.appendChild(link);
-      link.click();
-
-      // Revoke the object URL cleanly after slight delay
-      setTimeout(() => {
-        if (document.body.contains(link)) {
-          document.body.removeChild(link);
+        if (onStatusUpdate) onStatusUpdate('Saving to device storage...');
+        const blob = await response.blob();
+        
+        if (!blob || blob.size === 0) {
+          throw new Error('Received an empty file stream from the server.');
         }
-        window.URL.revokeObjectURL(blobUrl);
-      }, 1500);
 
-      return finalFilename;
+        const blobUrl = window.URL.createObjectURL(blob);
+        
+        // Determine safe filename from headers or fallback
+        let finalFilename = fallbackFilename || 'streamdrop_media.mp4';
+        const disposition = response.headers.get('Content-Disposition');
+        if (disposition && disposition.includes('filename=')) {
+          const matches = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+          if (matches && matches[1]) {
+            try {
+              finalFilename = decodeURIComponent(matches[1].replace(/['"]/g, '').trim());
+            } catch {
+              finalFilename = matches[1].replace(/['"]/g, '').trim();
+            }
+          }
+        }
+
+        // Dynamically create a hidden link, click, and revoke URL
+        const link = document.createElement('a');
+        link.style.display = 'none';
+        link.href = blobUrl;
+        link.download = finalFilename;
+        document.body.appendChild(link);
+        link.click();
+
+        // Revoke the object URL cleanly after slight delay
+        setTimeout(() => {
+          if (document.body.contains(link)) {
+            document.body.removeChild(link);
+          }
+          window.URL.revokeObjectURL(blobUrl);
+        }, 2000);
+
+        return finalFilename;
+      } catch (err) {
+        console.warn('Blob fetch failed, triggering direct fallback:', err);
+        const directLink = document.createElement('a');
+        directLink.href = downloadUrl;
+        directLink.download = fallbackFilename || 'media.mp4';
+        document.body.appendChild(directLink);
+        directLink.click();
+        setTimeout(() => {
+          if (document.body.contains(directLink)) document.body.removeChild(directLink);
+        }, 1500);
+        return fallbackFilename;
+      }
     }
 
     async function startDownload(format, quality, btnElement) {

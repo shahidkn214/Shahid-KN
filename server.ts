@@ -1621,57 +1621,96 @@ app.get('/api/progress/:jobId', (req, res) => {
   });
 });
 
-// API: Download finished file and cleanup with path traversal protection
+// API: Download finished file with safe headers and resilient fallback search
 app.get('/api/file/:jobId', (req, res) => {
-  const { jobId } = req.params;
-  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(jobId)) {
-    return res.status(400).send('Invalid job ID.');
-  }
+  try {
+    const { jobId } = req.params;
+    if (!jobId || !/^[a-zA-Z0-9_-]{1,64}$/.test(jobId)) {
+      return res.status(400).json({ success: false, error: 'Invalid job ID parameter.' });
+    }
 
-  const job = activeJobs.get(jobId);
-  if (!job || !job.filePath || !fs.existsSync(job.filePath)) {
-    return res.status(404).send('File not found or expired.');
-  }
+    const job = activeJobs.get(jobId);
+    const tempDir = path.resolve(os.tmpdir());
+    let targetFilePath = job?.filePath;
 
-  const filePath = path.resolve(job.filePath);
-  const tempDir = path.resolve(os.tmpdir());
-
-  // Prevent path traversal
-  if (!filePath.startsWith(tempDir)) {
-    return res.status(403).send('Forbidden file path.');
-  }
-
-  const ext = job.format === 'mp3' ? 'mp3' : 'mp4';
-  const customName = typeof req.query.name === 'string' ? req.query.name : `StreamDrop_${jobId}`;
-  const safeFilename = `${customName.replace(/[^\w\s.-]/gi, '_').substring(0, 100)}.${ext}`;
-
-  const contentType = job.format === 'mp3' ? 'audio/mpeg' : 'video/mp4';
-
-  res.setHeader('Content-Type', contentType);
-  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeFilename)}"`);
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-
-  const fileStream = fs.createReadStream(filePath);
-  fileStream.pipe(res);
-
-  // Background cleanup when stream finishes
-  fileStream.on('end', () => {
-    setTimeout(() => {
-      if (fs.existsSync(filePath)) {
-        try {
-          fs.unlinkSync(filePath);
-          console.log(`Cleaned up temp file: ${filePath}`);
-        } catch (e) {
-          console.error('Cleanup error:', e);
+    // Resilient fallback search in temp directory if exact path not set or moved
+    if (!targetFilePath || !fs.existsSync(targetFilePath)) {
+      try {
+        const files = fs.readdirSync(tempDir);
+        const matchingFile = files.find((f) => f.includes(jobId));
+        if (matchingFile) {
+          targetFilePath = path.join(tempDir, matchingFile);
         }
+      } catch (scanErr) {
+        console.warn('Error searching tempDir for file:', scanErr);
       }
-      activeJobs.delete(jobId);
-    }, 2000);
-  });
+    }
 
-  fileStream.on('error', (err) => {
-    console.error('File stream error:', err);
-  });
+    if (!targetFilePath || !fs.existsSync(targetFilePath)) {
+      return res.status(404).json({ success: false, error: 'File is not ready or has expired. Please try downloading again.' });
+    }
+
+    const resolvedFilePath = path.resolve(targetFilePath);
+
+    // Path traversal check
+    if (!resolvedFilePath.startsWith(tempDir) && !resolvedFilePath.startsWith(path.resolve(process.cwd()))) {
+      return res.status(403).json({ success: false, error: 'Forbidden file access.' });
+    }
+
+    const ext = job?.format === 'mp3' ? 'mp3' : (path.extname(resolvedFilePath).replace('.', '') || 'mp4');
+    
+    // Safely extract and sanitize custom filename
+    let customName = typeof req.query.name === 'string' ? req.query.name : `Nexversal_${jobId}`;
+    try {
+      customName = decodeURIComponent(customName);
+    } catch {
+      // keep raw customName
+    }
+    const safeAsciiName = customName.replace(/[^\w\s.-]/gi, '_').replace(/\s+/g, '_').substring(0, 80) || `media_${jobId}`;
+    const finalFilename = `${safeAsciiName}.${ext}`;
+
+    const stat = fs.statSync(resolvedFilePath);
+    const contentType = ext === 'mp3' ? 'audio/mpeg' : 'video/mp4';
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Length', stat.size);
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(finalFilename)}"; filename*=UTF-8''${encodeURIComponent(finalFilename)}`);
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length, Content-Type');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    const fileStream = fs.createReadStream(resolvedFilePath);
+    fileStream.pipe(res);
+
+    // Keep file available for 10 minutes in case of retries, then cleanup
+    setTimeout(() => {
+      try {
+        if (fs.existsSync(resolvedFilePath)) {
+          fs.unlinkSync(resolvedFilePath);
+          console.log(`Cleaned up temp file after timeout: ${resolvedFilePath}`);
+        }
+        activeJobs.delete(jobId);
+      } catch (cleanupErr) {
+        console.warn('Delayed cleanup notice:', cleanupErr);
+      }
+    }, 10 * 60 * 1000);
+
+    fileStream.on('error', (err) => {
+      console.error('File stream error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, error: 'Failed to stream media file.' });
+      }
+    });
+  } catch (err: any) {
+    console.error('Download file handler error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: err.message || 'Download failed.' });
+    }
+  }
+});
+
+// Alias for file route
+app.get('/api/download-file/:jobId', (req, res) => {
+  res.redirect(`/api/file/${req.params.jobId}${req.url.includes('?') ? '?' + req.url.split('?')[1] : ''}`);
 });
 
 // Production and Vite middleware integration

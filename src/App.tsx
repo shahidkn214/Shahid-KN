@@ -291,18 +291,34 @@ export default function App() {
               ...prev.filter((item) => item.url !== metadata.url),
             ]);
 
-            // 3. Trigger robust asynchronous Blob download in browser
-            const downloadUrl = `/api/file/${jobId}?name=${encodeURIComponent(
-              metadata.title || 'Nexversal_media'
-            )}`;
-            const safeFallbackName = `${(metadata.title || 'Nexversal_media').replace(/[^\w\s.-]/gi, '_').substring(0, 80)}.${format}`;
+            // 3. Trigger robust asynchronous Blob download with automatic direct-link fallback
+            const safeCleanTitle = (metadata.title || 'Nexversal_media')
+              .replace(/[^\w\s.-]/gi, '_')
+              .replace(/\s+/g, '_')
+              .substring(0, 80) || `media_${jobId}`;
+            const downloadUrl = `/api/file/${jobId}?name=${encodeURIComponent(safeCleanTitle)}`;
+            const safeFallbackName = `${safeCleanTitle}.${format}`;
 
             (async () => {
               try {
                 const response = await fetch(downloadUrl);
                 if (!response.ok) {
-                  throw new Error(`Server returned HTTP ${response.status}: ${response.statusText || 'Download failed'}`);
+                  console.warn(`Blob fetch returned HTTP ${response.status}, triggering direct anchor fallback.`);
+                  const fallbackLink = document.createElement('a');
+                  fallbackLink.href = downloadUrl;
+                  fallbackLink.setAttribute('download', safeFallbackName);
+                  document.body.appendChild(fallbackLink);
+                  fallbackLink.click();
+                  setTimeout(() => {
+                    if (document.body.contains(fallbackLink)) {
+                      document.body.removeChild(fallbackLink);
+                    }
+                  }, 1500);
+                  setSuccessMessage(`Download initiated! "${metadata.title.slice(0, 35)}..." is saving to device.`);
+                  setTimeout(() => setSuccessMessage(null), 5000);
+                  return;
                 }
+
                 const blob = await response.blob();
                 if (!blob || blob.size === 0) {
                   throw new Error('Received an empty file stream from the server.');
@@ -314,7 +330,11 @@ export default function App() {
                 if (disposition && disposition.includes('filename=')) {
                   const matches = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
                   if (matches && matches[1]) {
-                    finalFilename = decodeURIComponent(matches[1].replace(/['"]/g, '').trim());
+                    try {
+                      finalFilename = decodeURIComponent(matches[1].replace(/['"]/g, '').trim());
+                    } catch {
+                      finalFilename = matches[1].replace(/['"]/g, '').trim();
+                    }
                   }
                 }
 
@@ -330,13 +350,29 @@ export default function App() {
                     document.body.removeChild(link);
                   }
                   window.URL.revokeObjectURL(blobUrl);
-                }, 1500);
+                }, 2000);
 
                 setSuccessMessage(`Download ready! "${metadata.title.slice(0, 35)}..." saved.`);
                 setTimeout(() => setSuccessMessage(null), 5000);
               } catch (blobErr: any) {
-                console.error('Blob download failed:', blobErr);
-                setErrorMessage(`Failed to save file to device: ${blobErr.message || 'Network error'}`);
+                console.warn('Blob fetch failed, triggering direct browser link:', blobErr);
+                try {
+                  const fallbackLink = document.createElement('a');
+                  fallbackLink.href = downloadUrl;
+                  fallbackLink.setAttribute('download', safeFallbackName);
+                  document.body.appendChild(fallbackLink);
+                  fallbackLink.click();
+                  setTimeout(() => {
+                    if (document.body.contains(fallbackLink)) {
+                      document.body.removeChild(fallbackLink);
+                    }
+                  }, 1500);
+                  setSuccessMessage(`Download initiated for "${metadata.title.slice(0, 35)}...".`);
+                  setTimeout(() => setSuccessMessage(null), 5000);
+                } catch (fallbackErr: any) {
+                  console.error('All download methods failed:', fallbackErr);
+                  setErrorMessage(`Failed to save file: ${blobErr.message || 'Download failed'}`);
+                }
               }
             })();
           } else if (currentStatus === 'failed') {

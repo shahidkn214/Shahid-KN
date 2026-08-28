@@ -1131,44 +1131,48 @@ async def get_progress(job_id: str):
 @app.get("/api/file/{job_id}")
 @app.get("/api/download-file/{job_id}")
 async def download_file(job_id: str, background_tasks: BackgroundTasks, name: Optional[str] = None):
-    job = active_jobs.get(job_id)
-    if not job or job.get("status") != "completed":
-        raise HTTPException(status_code=404, detail="File is not ready or has expired.")
+    try:
+        job = active_jobs.get(job_id)
+        file_path = job.get("file_path") if job else None
 
-    file_path = job.get("file_path")
-    if not file_path or not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Requested file no longer exists.")
+        # Fallback file search if exact path was moved or missing
+        if not file_path or not os.path.exists(file_path):
+            matched = list(TEMP_DIR.glob(f"*{job_id}*"))
+            if matched:
+                file_path = str(matched[0])
 
-    p = Path(file_path)
-    if not is_safe_path(p):
-        raise HTTPException(status_code=403, detail="Path verification failed.")
+        if not file_path or not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="Requested file is no longer available or has expired.")
 
-    ext = job.get("format", "mp4")
-    clean_title = sanitize_filename(name or f"nexversal_{job_id}")
-    download_filename = f"{clean_title}.{ext}"
-    media_type = "audio/mpeg" if ext == "mp3" else "video/mp4"
+        p = Path(file_path)
+        if not is_safe_path(p):
+            raise HTTPException(status_code=403, detail="Path verification failed.")
 
-    def cleanup_file():
+        ext = job.get("format", "mp4") if job else (p.suffix.lstrip(".") or "mp4")
+        raw_name = name or f"nexversal_{job_id}"
         try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            active_jobs.pop(job_id, None)
-            logger.info(f"Cleaned up temporary job: {job_id}")
-        except Exception as e:
-            logger.warning(f"Failed to cleanup file {file_path}: {e}")
+            raw_name = urllib.parse.unquote(raw_name)
+        except Exception:
+            pass
+        clean_title = sanitize_filename(raw_name)
+        download_filename = f"{clean_title}.{ext}"
+        media_type = "audio/mpeg" if ext == "mp3" else "video/mp4"
 
-    background_tasks.add_task(cleanup_file)
-
-    return FileResponse(
-        path=file_path,
-        media_type=media_type,
-        filename=download_filename,
-        headers={
-            "Content-Disposition": f'attachment; filename="{download_filename}"',
-            "Access-Control-Expose-Headers": "Content-Disposition, Content-Length, Content-Type",
-            "X-Content-Type-Options": "nosniff"
-        }
-    )
+        # Safe FileResponse without conflicting manual Content-Disposition
+        return FileResponse(
+            path=file_path,
+            media_type=media_type,
+            filename=download_filename,
+            headers={
+                "Access-Control-Expose-Headers": "Content-Disposition, Content-Length, Content-Type",
+                "X-Content-Type-Options": "nosniff"
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error serving download for {job_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
 
 # ---------------------------------------------------------------------------
 # 9. Auth & History APIs
