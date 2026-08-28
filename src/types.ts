@@ -79,6 +79,14 @@ export interface HistoryItem {
   durationFormatted?: string;
 }
 
+export interface AuthUser {
+  id: number;
+  email: string;
+  username: string;
+  createdAt?: string;
+}
+
+
 // ---------------------------------------------------------------------------
 // Advanced Web & Media Metadata Inspector Types
 // ---------------------------------------------------------------------------

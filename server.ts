@@ -598,6 +598,7 @@ app.get('/api/history', (req, res) => {
       success: true,
       is_guest: true,
       history: [],
+      data: [],
     });
   }
 
@@ -607,6 +608,7 @@ app.get('/api/history', (req, res) => {
     is_guest: false,
     user_id: user.id,
     history,
+    data: history,
   });
 });
 

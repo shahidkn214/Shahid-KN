@@ -1263,7 +1263,8 @@ async def get_history(request: Request):
         "success": True,
         "is_guest": False,
         "user_id": user["id"],
-        "history": history
+        "history": history,
+        "data": history
     }
 
 @app.delete("/api/history/{history_id}")

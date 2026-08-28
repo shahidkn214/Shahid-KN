@@ -5,9 +5,10 @@ import { PlatformPills } from './components/PlatformPills';
 import { ResultCard } from './components/ResultCard';
 import { DownloadHistory } from './components/DownloadHistory';
 import { HowItWorks } from './components/HowItWorks';
-import { MediaMetadata, DownloadJob, HistoryItem, MetadataInspectionResult } from './types';
-import { AlertCircle, CheckCircle2, X } from 'lucide-react';
+import { AuthModal } from './components/AuthModal';
 import { MetadataInspector } from './components/MetadataInspector';
+import { MediaMetadata, DownloadJob, HistoryItem, MetadataInspectionResult, AuthUser } from './types';
+import { AlertCircle, CheckCircle2, X } from 'lucide-react';
 
 export default function App() {
   const [url, setUrl] = useState('');
@@ -18,24 +19,24 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
+  // Authentication & Session State
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [authToken, setAuthToken] = useState<string | null>(() => {
+    return localStorage.getItem('streamdrop_token') || null;
+  });
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [authModalMode, setAuthModalMode] = useState<'login' | 'register'>('login');
+
+  // History State (In-Memory for Guest, Persistent DB for Logged-In User)
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+
   // Metadata Inspector State
   const [isInspecting, setIsInspecting] = useState(false);
   const [inspectionResult, setInspectionResult] = useState<MetadataInspectionResult | null>(null);
 
-
-  // History state saved to localStorage
-  const [history, setHistory] = useState<HistoryItem[]>(() => {
-    try {
-      const saved = localStorage.getItem('streamdrop_history');
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
-
   const pollIntervalRef = useRef<any>(null);
 
-  // Check health on mount
+  // Fetch /api/health and check Auth Token on startup
   useEffect(() => {
     const checkHealth = async () => {
       try {
@@ -48,14 +49,77 @@ export default function App() {
       }
     };
     checkHealth();
+
+    // Verify Auth token & fetch user profile
+    if (authToken) {
+      fetchUserProfile(authToken);
+    }
   }, []);
 
-  // Save history
-  useEffect(() => {
+  const fetchUserProfile = async (token: string) => {
     try {
-      localStorage.setItem('streamdrop_history', JSON.stringify(history));
-    } catch {}
-  }, [history]);
+      const res = await fetch('/api/auth/me', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      const data = await res.json();
+      if (res.ok && data.success && data.user) {
+        setCurrentUser(data.user);
+        fetchUserHistory(token);
+      } else {
+        // Invalid or expired token
+        handleLogout();
+      }
+    } catch (err) {
+      console.warn('Auth verification failed:', err);
+    }
+  };
+
+  const fetchUserHistory = async (token: string) => {
+    try {
+      const res = await fetch('/api/history', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      const data = await res.json();
+      if (res.ok && data.success && Array.isArray(data.data)) {
+        const mappedHistory: HistoryItem[] = data.data.map((item: any) => ({
+          id: String(item.id),
+          url: item.source_url || item.url,
+          title: item.media_title || item.title,
+          thumbnail: item.media_thumbnail || item.thumbnail,
+          platform: item.platform || 'generic',
+          format: item.format_type || item.format || 'mp4',
+          quality: item.quality,
+          timestamp: item.created_at ? new Date(item.created_at).getTime() : Date.now(),
+          durationFormatted: item.duration_formatted,
+        }));
+        setHistory(mappedHistory);
+      }
+    } catch (err) {
+      console.warn('Failed to load user download history:', err);
+    }
+  };
+
+  const handleAuthSuccess = (token: string, user: AuthUser) => {
+    localStorage.setItem('streamdrop_token', token);
+    setAuthToken(token);
+    setCurrentUser(user);
+    setSuccessMessage(`Welcome, ${user.username}! Your downloads are now synced to cloud.`);
+    setTimeout(() => setSuccessMessage(null), 4000);
+    fetchUserHistory(token);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('streamdrop_token');
+    setAuthToken(null);
+    setCurrentUser(null);
+    setHistory([]); // Clear in-memory history
+    setSuccessMessage('Logged out. Switched to private guest session.');
+    setTimeout(() => setSuccessMessage(null), 3000);
+  };
 
   // Clean up poll interval on unmount
   useEffect(() => {
@@ -89,7 +153,7 @@ export default function App() {
       setSuccessMessage(`Extracted "${data.data.title.slice(0, 45)}..." from ${data.data.platformName}`);
       setTimeout(() => setSuccessMessage(null), 4000);
 
-      // Auto-trigger inspector in background for seamless UX
+      // Auto-trigger inspector in background for rich diagnostics
       handleInspect(data.data.resolvedUrl || data.data.url || url.trim());
     } catch (err: any) {
       console.error('Analyze error:', err);
@@ -123,7 +187,6 @@ export default function App() {
       setIsInspecting(false);
     }
   };
-
 
   const handleStartDownload = async (format: 'mp4' | 'mp3', quality = 'best') => {
     if (!metadata) return;
@@ -191,7 +254,26 @@ export default function App() {
           if (currentStatus === 'completed') {
             clearInterval(pollIntervalRef.current);
 
-            // Add to history
+            // 1. Audit / Log to Backend Database (attaches user_id if logged in, NULL if guest)
+            const authHeader: Record<string, string> = { 'Content-Type': 'application/json' };
+            if (authToken) {
+              authHeader['Authorization'] = `Bearer ${authToken}`;
+            }
+
+            fetch('/api/log-download', {
+              method: 'POST',
+              headers: authHeader,
+              body: JSON.stringify({
+                media_title: metadata.title,
+                source_url: metadata.url,
+                platform: metadata.platform,
+                format_type: format,
+                quality: quality,
+                media_thumbnail: metadata.thumbnail,
+              }),
+            }).catch((logErr) => console.warn('Download audit logging notice:', logErr));
+
+            // 2. Add to current in-memory UI history
             const historyEntry: HistoryItem = {
               id: Date.now().toString(),
               url: metadata.url,
@@ -199,6 +281,7 @@ export default function App() {
               thumbnail: metadata.thumbnail,
               platform: metadata.platform,
               format,
+              quality,
               timestamp: Date.now(),
               durationFormatted: metadata.durationFormatted,
             };
@@ -208,11 +291,11 @@ export default function App() {
               ...prev.filter((item) => item.url !== metadata.url),
             ]);
 
-            // Trigger robust asynchronous Blob download in browser
+            // 3. Trigger robust asynchronous Blob download in browser
             const downloadUrl = `/api/file/${jobId}?name=${encodeURIComponent(
-              metadata.title || 'StreamDrop_media'
+              metadata.title || 'Nexversal_media'
             )}`;
-            const safeFallbackName = `${(metadata.title || 'StreamDrop_media').replace(/[^\w\s.-]/gi, '_').substring(0, 80)}.${format}`;
+            const safeFallbackName = `${(metadata.title || 'Nexversal_media').replace(/[^\w\s.-]/gi, '_').substring(0, 80)}.${format}`;
 
             (async () => {
               try {
@@ -275,8 +358,53 @@ export default function App() {
     setUrl(sampleUrl);
   };
 
-  const handleClearHistory = () => {
+  // Soft-Delete Single Item
+  const handleDeleteHistoryItem = async (id: string) => {
+    // 1. Remove from local state immediately
+    setHistory((prev) => prev.filter((item) => item.id !== id));
+
+    // 2. If logged in, send soft-delete request to backend
+    if (authToken) {
+      try {
+        await fetch(`/api/history/${id}`, {
+          method: 'DELETE',
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+          },
+        });
+      } catch (err) {
+        console.warn('Soft-delete failed on server:', err);
+      }
+    }
+  };
+
+  // Soft-Delete All History
+  const handleClearHistory = async () => {
+    // 1. Clear UI state immediately
     setHistory([]);
+
+    // 2. If logged in, tell backend to soft-delete all records for this user
+    if (authToken) {
+      try {
+        await fetch('/api/history', {
+          method: 'DELETE',
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+          },
+        });
+        setSuccessMessage('Your cloud history has been cleared safely.');
+        setTimeout(() => setSuccessMessage(null), 3000);
+      } catch (err) {
+        console.warn('Soft-delete clear all failed on server:', err);
+      }
+    }
+  };
+
+  const scrollToHistory = () => {
+    const el = document.getElementById('download-history-section');
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth' });
+    }
   };
 
   return (
@@ -286,7 +414,17 @@ export default function App() {
       <div className="fixed bottom-0 left-1/3 w-80 h-80 bg-teal-500/5 blur-[120px] pointer-events-none rounded-full" />
 
       {/* Header */}
-      <Header isBackendHealthy={isBackendHealthy} />
+      <Header
+        isBackendHealthy={isBackendHealthy}
+        currentUser={currentUser}
+        historyCount={history.length}
+        onOpenAuth={(mode) => {
+          setAuthModalMode(mode);
+          setIsAuthModalOpen(true);
+        }}
+        onLogout={handleLogout}
+        onScrollToHistory={scrollToHistory}
+      />
 
       {/* Main Content Area */}
       <main className="w-full max-w-4xl px-4 sm:px-6 flex flex-col items-center gap-7 pb-16 relative z-10">
@@ -357,7 +495,7 @@ export default function App() {
           />
         )}
 
-        {/* Web & Media Metadata Inspector (7 Dimensions) */}
+        {/* Web & Media Metadata Inspector */}
         {(url.trim() || metadata) && (
           <MetadataInspector
             inspection={inspectionResult}
@@ -367,11 +505,12 @@ export default function App() {
           />
         )}
 
-        {/* Recent Downloads History */}
-
+        {/* Recent Downloads History with Soft-Delete & Guest/User indicators */}
         <DownloadHistory
           items={history}
+          currentUser={currentUser}
           onClearHistory={handleClearHistory}
+          onDeleteItem={handleDeleteHistoryItem}
           onSelectItem={(selectedUrl) => {
             setUrl(selectedUrl);
             window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -381,6 +520,14 @@ export default function App() {
         {/* Engine Architecture & How It Works */}
         <HowItWorks />
       </main>
+
+      {/* Auth Modal */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        initialMode={authModalMode}
+        onClose={() => setIsAuthModalOpen(false)}
+        onSuccess={handleAuthSuccess}
+      />
 
       {/* Footer */}
       <footer className="w-full border-t border-gray-800/80 py-6 text-center text-xs text-gray-500 bg-[#030712]/90 relative z-10">
