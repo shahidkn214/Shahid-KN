@@ -18,8 +18,16 @@ export const Header: React.FC<HeaderProps> = ({ isBackendHealthy }) => {
   return (
     <header className="w-full max-w-4xl flex flex-col sm:flex-row items-center justify-between gap-3 py-4 px-4 sm:px-6 border-b border-gray-800/60 mb-6 sm:mb-8 backdrop-blur-md sticky top-0 z-30 bg-[#030712]/80">
       <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500 via-teal-500 to-emerald-700 flex items-center justify-center text-gray-950 font-black shadow-lg shadow-emerald-500/25 ring-1 ring-emerald-400/40">
-          <ArrowDownToLine className="w-5 h-5 text-gray-950 stroke-[2.5]" />
+        <div className="relative group cursor-pointer">
+          <div className="absolute -inset-0.5 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-xl blur opacity-40 group-hover:opacity-75 transition duration-300"></div>
+          <div className="relative w-10 h-10 rounded-xl bg-[#030712] border border-emerald-500/30 flex items-center justify-center p-1.5 shadow-lg shadow-emerald-500/20">
+            <img
+              src="/favicon.svg"
+              alt="Nexversal Logo"
+              className="w-full h-full object-contain drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]"
+              referrerPolicy="no-referrer"
+            />
+          </div>
         </div>
         <div>
           <h1 className="text-xl font-extrabold tracking-tight text-white flex items-center gap-2">
