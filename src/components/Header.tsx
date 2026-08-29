@@ -8,7 +8,7 @@ interface HeaderProps {
   historyCount: number;
   onOpenAuth: (mode: 'login' | 'register') => void;
   onLogout: () => void;
-  onScrollToHistory: () => void;
+  onOpenHistory: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -17,7 +17,7 @@ export const Header: React.FC<HeaderProps> = ({
   historyCount,
   onOpenAuth,
   onLogout,
-  onScrollToHistory,
+  onOpenHistory,
 }) => {
   return (
     <header className="w-full max-w-4xl flex flex-col sm:flex-row items-center justify-between gap-3 py-4 px-4 sm:px-6 border-b border-gray-800/60 mb-6 sm:mb-8 backdrop-blur-md sticky top-0 z-30 bg-[#030712]/80">
@@ -48,11 +48,11 @@ export const Header: React.FC<HeaderProps> = ({
         {/* History Quick Access */}
         <button
           type="button"
-          onClick={onScrollToHistory}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gray-900/90 hover:bg-gray-800 text-gray-200 border border-gray-800 hover:border-gray-700 text-xs font-semibold transition-all shadow-sm active:scale-95"
-          title="Scroll to Download History"
+          onClick={onOpenHistory}
+          className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-gray-900/90 hover:bg-gray-800 text-gray-200 border border-gray-800 hover:border-emerald-500/40 text-xs font-semibold transition-all shadow-sm active:scale-95 cursor-pointer"
+          title="Open Download History"
         >
-          <History className="w-3.5 h-3.5 text-emerald-400" />
+          <History className="w-4 h-4 text-emerald-400" />
           <span>History</span>
           {historyCount > 0 && (
             <span className="text-[10px] font-extrabold px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">

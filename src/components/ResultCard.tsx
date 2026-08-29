@@ -15,6 +15,7 @@ import {
   Music,
   XCircle,
   StopCircle,
+  X,
 } from 'lucide-react';
 import { MediaMetadata, DownloadJob } from '../types';
 
@@ -22,6 +23,7 @@ interface ResultCardProps {
   metadata: MediaMetadata;
   onStartDownload: (format: 'mp4' | 'mp3', quality?: string) => Promise<void>;
   onCancelDownload?: () => void;
+  onDismissProgress?: () => void;
   downloadJob: DownloadJob | null;
 }
 
@@ -29,6 +31,7 @@ export const ResultCard: React.FC<ResultCardProps> = ({
   metadata,
   onStartDownload,
   onCancelDownload,
+  onDismissProgress,
   downloadJob,
 }) => {
   const [activeTab, setActiveTab] = useState<'video' | 'audio'>(

@@ -1,18 +1,11 @@
 import React from 'react';
-import { Youtube, Facebook, Music2, Instagram, Twitter, Radio, PlayCircle, Sparkles } from 'lucide-react';
+import { Youtube, Facebook, Music2, Instagram, Twitter, Radio, Sparkles } from 'lucide-react';
 
 interface PlatformPillsProps {
   onSelectSample: (sampleUrl: string) => void;
 }
 
 const PLATFORMS = [
-  {
-    name: '1-Click Sample Test',
-    icon: <PlayCircle className="w-3.5 h-3.5" />,
-    color: 'hover:border-emerald-500/60 hover:bg-emerald-500/10 text-emerald-400 border-emerald-500/30',
-    sample: 'https://commons.wikimedia.org/wiki/File:Example.ogg',
-    isTest: true,
-  },
   {
     name: 'YouTube',
     icon: <Youtube className="w-3.5 h-3.5" />,
@@ -56,7 +49,7 @@ export const PlatformPills: React.FC<PlatformPillsProps> = ({ onSelectSample }) 
     <div className="w-full flex flex-col items-center gap-2.5">
       <div className="flex items-center gap-1.5 text-xs text-gray-400">
         <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
-        <span>Supported Platforms & 1-Click Test Media:</span>
+        <span>Supported Platforms:</span>
       </div>
       <div className="flex flex-wrap items-center justify-center gap-2 text-xs">
         {PLATFORMS.map((p) => (
@@ -65,7 +58,7 @@ export const PlatformPills: React.FC<PlatformPillsProps> = ({ onSelectSample }) 
             type="button"
             onClick={() => onSelectSample(p.sample)}
             className={`px-3 py-1.5 rounded-full bg-gray-900/80 border border-gray-800 flex items-center gap-1.5 font-medium transition-all duration-200 active:scale-95 ${p.color}`}
-            title={`Click to test with ${p.name}`}
+            title={`Select ${p.name} format`}
           >
             {p.icon}
             <span>{p.name}</span>
