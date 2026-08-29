@@ -57,7 +57,7 @@ export interface DownloadJob {
   format: 'mp4' | 'mp3';
   quality?: string;
   selectedLabel?: string;
-  status: 'queued' | 'downloading' | 'converting' | 'completed' | 'failed';
+  status: 'queued' | 'downloading' | 'converting' | 'completed' | 'failed' | 'cancelled';
   progress: number;
   eta?: string;
   speed?: string;

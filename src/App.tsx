@@ -378,6 +378,8 @@ export default function App() {
           } else if (currentStatus === 'failed') {
             clearInterval(pollIntervalRef.current);
             setErrorMessage(job.error || 'Conversion encountered an error.');
+          } else if (currentStatus === 'cancelled') {
+            clearInterval(pollIntervalRef.current);
           }
         } catch (pollErr) {
           console.warn('Poll error:', pollErr);
@@ -387,6 +389,23 @@ export default function App() {
       console.error('Download error:', err);
       setErrorMessage(err.message || 'Failed to start download.');
       setDownloadJob(null);
+    }
+  };
+
+  const handleCancelDownload = async () => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+    }
+
+    if (downloadJob?.jobId) {
+      const targetId = downloadJob.jobId;
+      setDownloadJob((prev) => (prev ? { ...prev, status: 'cancelled', error: 'Download cancelled.' } : null));
+
+      try {
+        await fetch(`/api/cancel-download/${targetId}`, { method: 'POST' });
+      } catch (cancelErr) {
+        console.warn('Cancel API request error:', cancelErr);
+      }
     }
   };
 
@@ -527,6 +546,7 @@ export default function App() {
           <ResultCard
             metadata={metadata}
             onStartDownload={handleStartDownload}
+            onCancelDownload={handleCancelDownload}
             downloadJob={downloadJob}
           />
         )}

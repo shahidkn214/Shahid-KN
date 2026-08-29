@@ -291,7 +291,7 @@ interface ActiveJob {
   url: string;
   format: 'mp4' | 'mp3';
   quality: string;
-  status: 'queued' | 'downloading' | 'converting' | 'completed' | 'failed';
+  status: 'queued' | 'downloading' | 'converting' | 'completed' | 'failed' | 'cancelled';
   progress: number;
   speed?: string;
   eta?: string;
@@ -303,6 +303,8 @@ interface ActiveJob {
 }
 
 const activeJobs = new Map<string, ActiveJob>();
+const activeProcesses = new Map<string, any>();
+const analyzeCache = new Map<string, { data: any; timestamp: number }>();
 
 // ---------------------------------------------------------------------------
 // Database Architecture & Soft-Delete Persistence Layer
@@ -717,21 +719,31 @@ app.post('/api/analyze', async (req, res) => {
     const resolvedUrl = await resolveUrlRedirect(cleanUrl);
     const platformInfo = detectPlatform(resolvedUrl);
 
+    // High-Speed In-Memory Cache Check (<1ms response time)
+    const cachedItem = analyzeCache.get(resolvedUrl) || analyzeCache.get(cleanUrl);
+    if (cachedItem && Date.now() - cachedItem.timestamp < 15 * 60 * 1000) {
+      return res.json({ success: true, data: cachedItem.data, fromCache: true });
+    }
+
     const ytDlp = getYtDlpPath();
 
-    // Call yt-dlp with --dump-single-json to extract metadata safely
+    // Call yt-dlp with optimized flags for fastest metadata extraction
     const args = [
       '--dump-single-json',
       '--no-warnings',
       '--no-playlist',
+      '--flat-playlist',
+      '--skip-download',
+      '--no-check-certificates',
+      '--prefer-free-formats',
       '--socket-timeout',
-      '12',
+      '8',
       '--user-agent',
       USER_AGENT,
       '--referer',
       'https://www.google.com/',
       '--extractor-args',
-      'twitter:api=syndication;youtube:player_client=android,web;tiktok:api_hostname=api16-normal-c-useast1a.tiktokv.com;generic:impersonate=chrome',
+      'youtube:player_client=ios,web,android;player_skip=configs;twitter:api=syndication;tiktok:api_hostname=api16-normal-c-useast1a.tiktokv.com;generic:impersonate=chrome',
       resolvedUrl,
     ];
 
@@ -979,6 +991,10 @@ app.post('/api/analyze', async (req, res) => {
             })),
           ],
         };
+
+        // Cache in memory for ultra-fast subsequent lookups
+        analyzeCache.set(resolvedUrl, { data: metadata, timestamp: Date.now() });
+        analyzeCache.set(cleanUrl, { data: metadata, timestamp: Date.now() });
 
         return res.json({ success: true, data: metadata });
       } catch (e: any) {
@@ -1482,11 +1498,13 @@ const handleDownloadRequest = async (req: express.Request, res: express.Response
 
     // Launch download process
     const child = spawn(ytDlp, args);
+    activeProcesses.set(jobId, child);
     job.status = 'downloading';
     const stderrLines: string[] = [];
 
     child.on('error', (err) => {
       console.error(`[Job ${jobId}] yt-dlp spawn error:`, err);
+      activeProcesses.delete(jobId);
       job.status = 'failed';
       job.error = `Download process error: ${err.message}`;
     });
@@ -1498,17 +1516,21 @@ const handleDownloadRequest = async (req: express.Request, res: express.Response
         line.match(/\[download\]\s+([\d.]+)%/i);
 
       if (downloadMatch) {
-        job.status = 'downloading';
-        job.progress = Math.min(98, Math.max(1, parseFloat(downloadMatch[1])));
-        if (downloadMatch[2]) job.totalSize = downloadMatch[2];
-        if (downloadMatch[3]) job.speed = downloadMatch[3];
-        if (downloadMatch[4]) job.eta = downloadMatch[4];
+        if (job.status !== 'cancelled') {
+          job.status = 'downloading';
+          job.progress = Math.min(98, Math.max(1, parseFloat(downloadMatch[1])));
+          if (downloadMatch[2]) job.totalSize = downloadMatch[2];
+          if (downloadMatch[3]) job.speed = downloadMatch[3];
+          if (downloadMatch[4]) job.eta = downloadMatch[4];
+        }
       }
 
       // Check for converting/post-processing
       if (line.includes('[ExtractAudio]') || line.includes('[Merger]') || line.includes('[ffmpeg]') || line.includes('Post-process')) {
-        job.status = 'converting';
-        job.progress = 98;
+        if (job.status !== 'cancelled') {
+          job.status = 'converting';
+          job.progress = 98;
+        }
       }
 
       // Capture destination filename
@@ -1528,6 +1550,19 @@ const handleDownloadRequest = async (req: express.Request, res: express.Response
     });
 
     child.on('close', (code) => {
+      activeProcesses.delete(jobId);
+
+      if (job.status === 'cancelled') {
+        // Clean up any partial files
+        try {
+          const files = fs.readdirSync(tempDir);
+          files.filter(f => f.includes(jobId)).forEach(f => {
+            try { fs.unlinkSync(path.join(tempDir, f)); } catch {}
+          });
+        } catch {}
+        return;
+      }
+
       if (code === 0) {
         // Find produced file in temp dir if not captured
         const expectedExt = job.format === 'mp3' ? '.mp3' : '.mp4';
@@ -1592,6 +1627,55 @@ const handleDownloadRequest = async (req: express.Request, res: express.Response
 
 app.post('/api/start-download', handleDownloadRequest);
 app.post('/api/download', handleDownloadRequest);
+
+// API: Cancel active download job
+const handleCancelDownload = (req: any, res: any) => {
+  const jobId = req.params.jobId || req.body?.jobId || req.body?.job_id;
+  if (!jobId || !/^[a-zA-Z0-9_-]{1,64}$/.test(jobId)) {
+    return res.status(400).json({ success: false, error: 'Invalid job ID.' });
+  }
+
+  const job = activeJobs.get(jobId);
+  const process = activeProcesses.get(jobId);
+
+  if (process) {
+    try {
+      process.kill('SIGTERM');
+      setTimeout(() => {
+        try { process.kill('SIGKILL'); } catch {}
+      }, 400);
+    } catch (killErr) {
+      console.warn(`[Job ${jobId}] Error killing process:`, killErr);
+    }
+    activeProcesses.delete(jobId);
+  }
+
+  if (job) {
+    job.status = 'cancelled';
+    job.error = 'Download cancelled by user.';
+  }
+
+  // Cleanup partial temp files
+  try {
+    const tempDir = path.resolve(os.tmpdir());
+    const files = fs.readdirSync(tempDir);
+    files.filter(f => f.includes(jobId)).forEach(f => {
+      try { fs.unlinkSync(path.join(tempDir, f)); } catch {}
+    });
+  } catch (cleanupErr) {
+    console.warn(`[Job ${jobId}] Cleanup error after cancel:`, cleanupErr);
+  }
+
+  return res.json({
+    success: true,
+    message: 'Download job cancelled successfully.',
+    jobId,
+  });
+};
+
+app.post('/api/cancel-download/:jobId', handleCancelDownload);
+app.post('/api/cancel-download', handleCancelDownload);
+app.post('/api/cancel/:jobId', handleCancelDownload);
 
 // API: Check progress
 app.get('/api/progress/:jobId', (req, res) => {

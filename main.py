@@ -180,6 +180,8 @@ def is_safe_path(target_path: Path) -> bool:
         return False
 
 active_jobs: Dict[str, Dict[str, Any]] = {}
+active_processes: Dict[str, Any] = {}
+analyze_cache: Dict[str, Dict[str, Any]] = {}
 
 # ---------------------------------------------------------------------------
 # 5. Database Manager & Soft-Delete Persistence
@@ -583,12 +585,14 @@ def find_ffmpeg_binary() -> Optional[str]:
             return loc
     return None
 
-async def run_ytdlp_process(cmd: list, job: dict, progress_re: re.Pattern) -> tuple[int, list[str]]:
+async def run_ytdlp_process(cmd: list, job: dict, progress_re: re.Pattern, job_id: str = "") -> tuple[int, list[str]]:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
+    if job_id:
+        active_processes[job_id] = proc
 
     stderr_output = []
 
@@ -607,6 +611,13 @@ async def run_ytdlp_process(cmd: list, job: dict, progress_re: re.Pattern) -> tu
     asyncio.create_task(capture_stderr())
 
     while True:
+        if job.get("status") == "cancelled":
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            break
+
         line_bytes = await proc.stdout.readline()
         if not line_bytes:
             break
@@ -615,17 +626,21 @@ async def run_ytdlp_process(cmd: list, job: dict, progress_re: re.Pattern) -> tu
         match = progress_re.search(line)
         if match:
             pct = float(match.group(1))
-            job["progress"] = min(95, max(10, int(pct)))
-            job["total_size"] = match.group(2)
-            job["speed"] = match.group(3)
-            job["eta"] = match.group(4)
-            job["status"] = "downloading"
+            if job.get("status") != "cancelled":
+                job["progress"] = min(95, max(10, int(pct)))
+                job["total_size"] = match.group(2)
+                job["speed"] = match.group(3)
+                job["eta"] = match.group(4)
+                job["status"] = "downloading"
         elif "[ExtractAudio]" in line or "[ffmpeg]" in line or "Post-process" in line or "[Merger]" in line:
-            job["status"] = "converting"
-            job["progress"] = 94
-            job["speed"] = "Encoding & FFmpeg processing..."
+            if job.get("status") != "cancelled":
+                job["status"] = "converting"
+                job["progress"] = 94
+                job["speed"] = "Encoding & FFmpeg processing..."
 
     await proc.wait()
+    if job_id:
+        active_processes.pop(job_id, None)
     return proc.returncode, stderr_output
 
 async def execute_download_job(job_id: str, url: str, fmt: str, quality: str):
@@ -719,7 +734,15 @@ async def execute_download_job(job_id: str, url: str, fmt: str, quality: str):
         logger.info(f"Executing secure job {job_id} (attempt {attempt+1}) on {url}")
 
         try:
-            returncode, stderr_output = await run_ytdlp_process(cmd, job, progress_re)
+            if job.get("status") == "cancelled":
+                logger.info(f"Job {job_id} was cancelled before execution.")
+                return
+
+            returncode, stderr_output = await run_ytdlp_process(cmd, job, progress_re, job_id)
+
+            if job.get("status") == "cancelled":
+                logger.info(f"Job {job_id} cancelled during processing.")
+                return
 
             if returncode == 0:
                 ext = "mp3" if fmt == "mp3" else "mp4"
@@ -794,17 +817,25 @@ async def analyze_url(payload: AnalyzeRequest, request: Request):
     if not is_safe_public_url(url):
         raise HTTPException(status_code=400, detail="Requested domain is restricted or invalid.")
 
+    # High-Speed In-Memory Cache Check (<1ms response)
+    cached = analyze_cache.get(url)
+    if cached and (time.time() - cached.get("timestamp", 0) < 900):
+        return {"success": True, "data": cached.get("data"), "fromCache": True}
+
     logger.info(f"Analyzing URL from {client_ip}: {url}")
     cmd = [
         "yt-dlp",
         "--dump-single-json",
         "--no-playlist",
+        "--flat-playlist",
         "--skip-download",
+        "--no-check-certificates",
+        "--prefer-free-formats",
         "--no-warnings",
-        "--socket-timeout", "12",
-        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "--socket-timeout", "8",
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
         "--referer", "https://www.google.com/",
-        "--extractor-args", "youtube:player_client=android,web;tiktok:api_hostname=api16-normal-c-useast1a.tiktokv.com;generic:impersonate=chrome",
+        "--extractor-args", "youtube:player_client=ios,web,android;player_skip=configs;twitter:api=syndication;tiktok:api_hostname=api16-normal-c-useast1a.tiktokv.com;generic:impersonate=chrome",
         url
     ]
 
@@ -849,27 +880,34 @@ async def analyze_url(payload: AnalyzeRequest, request: Request):
         video_resolutions = [] if is_audio_only else extract_video_resolutions(info)
         audio_bitrates = extract_audio_bitrates(info)
 
+        data_payload = {
+            "id": info.get("id", str(uuid.uuid4())[:8]),
+            "url": url,
+            "resolvedUrl": info.get("webpage_url", url),
+            "title": info.get("title", "Untitled Stream"),
+            "thumbnail": info.get("thumbnail", ""),
+            "duration": duration,
+            "durationFormatted": format_duration(duration),
+            "uploader": info.get("uploader") or info.get("channel") or info.get("artist") or platform_info["name"],
+            "uploaderUrl": info.get("uploader_url") or info.get("channel_url"),
+            "platform": platform_info["id"],
+            "platformName": platform_info["name"],
+            "platformColor": platform_info["color"],
+            "viewCount": info.get("view_count", 0),
+            "likeCount": info.get("like_count", 0),
+            "isAudioOnly": is_audio_only,
+            "videoResolutions": video_resolutions,
+            "audioBitrates": audio_bitrates
+        }
+
+        # Cache extracted metadata for fast repeat operations
+        analyze_cache[url] = {"data": data_payload, "timestamp": time.time()}
+        if info.get("webpage_url"):
+            analyze_cache[info.get("webpage_url")] = {"data": data_payload, "timestamp": time.time()}
+
         return {
             "success": True,
-            "data": {
-                "id": info.get("id", str(uuid.uuid4())[:8]),
-                "url": url,
-                "resolvedUrl": info.get("webpage_url", url),
-                "title": info.get("title", "Untitled Stream"),
-                "thumbnail": info.get("thumbnail", ""),
-                "duration": duration,
-                "durationFormatted": format_duration(duration),
-                "uploader": info.get("uploader") or info.get("channel") or info.get("artist") or platform_info["name"],
-                "uploaderUrl": info.get("uploader_url") or info.get("channel_url"),
-                "platform": platform_info["id"],
-                "platformName": platform_info["name"],
-                "platformColor": platform_info["color"],
-                "viewCount": info.get("view_count", 0),
-                "likeCount": info.get("like_count", 0),
-                "isAudioOnly": is_audio_only,
-                "videoResolutions": video_resolutions,
-                "audioBitrates": audio_bitrates
-            }
+            "data": data_payload
         }
     except HTTPException:
         raise
@@ -1105,6 +1143,50 @@ async def start_download(payload: DownloadRequest, request: Request, background_
         "download_url": f"/api/file/{job_id}",
         "status_url": f"/api/progress/{job_id}",
         "message": f"Conversion started ({fmt.upper()})"
+    }
+
+@app.post("/api/cancel-download/{job_id}")
+@app.post("/api/cancel/{job_id}")
+@app.post("/api/cancel-download")
+async def cancel_download(job_id: Optional[str] = None, request: Optional[Request] = None):
+    target_id = job_id
+    if not target_id and request:
+        try:
+            body = await request.json()
+            target_id = body.get("jobId") or body.get("job_id")
+        except Exception:
+            pass
+
+    if not target_id:
+        raise HTTPException(status_code=400, detail="Job ID required.")
+
+    job = active_jobs.get(target_id)
+    if job:
+        job["status"] = "cancelled"
+        job["error"] = "Download cancelled by user."
+
+    proc = active_processes.pop(target_id, None)
+    if proc:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+    # Clean partial files
+    try:
+        for f in TEMP_DIR.glob(f"*{target_id}*"):
+            try:
+                if f.is_file():
+                    f.unlink()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return {
+        "success": True,
+        "jobId": target_id,
+        "message": "Download cancelled successfully."
     }
 
 @app.get("/api/progress/{job_id}")

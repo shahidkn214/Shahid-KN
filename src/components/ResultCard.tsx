@@ -13,18 +13,22 @@ import {
   Sparkles,
   Layers,
   Music,
+  XCircle,
+  StopCircle,
 } from 'lucide-react';
 import { MediaMetadata, DownloadJob } from '../types';
 
 interface ResultCardProps {
   metadata: MediaMetadata;
   onStartDownload: (format: 'mp4' | 'mp3', quality?: string) => Promise<void>;
+  onCancelDownload?: () => void;
   downloadJob: DownloadJob | null;
 }
 
 export const ResultCard: React.FC<ResultCardProps> = ({
   metadata,
   onStartDownload,
+  onCancelDownload,
   downloadJob,
 }) => {
   const [activeTab, setActiveTab] = useState<'video' | 'audio'>(
@@ -374,6 +378,12 @@ export const ResultCard: React.FC<ResultCardProps> = ({
                     FFmpeg transcoding {downloadJob.quality} MP3 audio...
                   </span>
                 )}
+                {downloadJob.status === 'cancelled' && (
+                  <span className="flex items-center gap-1.5 text-amber-400 font-semibold">
+                    <XCircle className="w-4 h-4 text-amber-400" />
+                    Download cancelled.
+                  </span>
+                )}
                 {downloadJob.status === 'completed' && (
                   <div className="flex items-center gap-3">
                     <span className="flex items-center gap-1.5 text-emerald-400 font-bold">
@@ -399,15 +409,35 @@ export const ResultCard: React.FC<ResultCardProps> = ({
                   </span>
                 )}
               </div>
-              <span className="text-white font-mono font-bold">
-                {Math.round(downloadJob.progress)}%
-              </span>
+
+              <div className="flex items-center gap-3">
+                {isDownloading && onCancelDownload && (
+                  <button
+                    type="button"
+                    onClick={onCancelDownload}
+                    className="px-2.5 py-1 rounded-lg bg-red-500/15 hover:bg-red-500/25 border border-red-500/30 text-red-300 hover:text-red-100 text-[11px] font-bold inline-flex items-center gap-1.5 transition active:scale-95 cursor-pointer"
+                    title="Cancel download at any time"
+                  >
+                    <StopCircle className="w-3.5 h-3.5 text-red-400" />
+                    <span>Cancel</span>
+                  </button>
+                )}
+                <span className="text-white font-mono font-bold">
+                  {Math.round(downloadJob.progress)}%
+                </span>
+              </div>
             </div>
 
             {/* Progress Bar */}
             <div className="w-full h-2.5 rounded-full bg-gray-950 overflow-hidden p-0.5 border border-gray-800">
               <div
-                className="h-full rounded-full bg-gradient-to-r from-emerald-500 via-teal-400 to-emerald-400 transition-all duration-300 shadow-sm shadow-emerald-500/50"
+                className={`h-full rounded-full transition-all duration-300 shadow-sm ${
+                  downloadJob.status === 'cancelled'
+                    ? 'bg-amber-500/50'
+                    : downloadJob.status === 'failed'
+                    ? 'bg-red-500'
+                    : 'bg-gradient-to-r from-emerald-500 via-teal-400 to-emerald-400 shadow-emerald-500/50'
+                }`}
                 style={{ width: `${Math.max(3, downloadJob.progress)}%` }}
               />
             </div>
